@@ -1,0 +1,19 @@
+# Python environment and caches
+.venv/
+__pycache__/
+
+# Secrets (API keys, e-mail passwords) - never commit
+.env
+
+# Real company data and anything built from it - never commit
+data/raw/
+data/retail.db
+data/store_mapping.csv
+data/previous_month_sales.csv
+data/pipeline_checkpoints.db
+
+# Local notes, editor files, e-mail copies, learning scripts
+*.docx
+.vscode/
+outbox/
+hello_*.py
