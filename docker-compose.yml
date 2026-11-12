@@ -1,0 +1,22 @@
+# Start everything:   docker compose up -d --build
+# On a server set the address first:   PUBLIC_HOST=203.0.113.7 docker compose up -d --build
+# Stop:               docker compose down        (the database is kept)      Delete the database too:  docker compose down -v
+services:
+  retail:
+    build: .
+    ports:
+      - "8501:8501"   # 360 Degree View
+      - "8502:8502"   # Store Replenishment App
+      - "8503:8503"   # Warehouse Packaging App
+      - "8504:8504"   # Store Stock Request App
+    environment:
+      TZ: ${TZ:-Asia/Kolkata}
+      PUBLIC_HOST: ${PUBLIC_HOST:-localhost}      # the address people type in the browser (the links between the apps use it)
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}         # optional: AI-written notes (leave empty to use standard texts)
+    volumes:
+      - retail-data:/app/data                     # the database survives restarts and rebuilds
+      - retail-outbox:/app/outbox
+    restart: unless-stopped
+volumes:
+  retail-data:
+  retail-outbox:

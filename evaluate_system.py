@@ -654,6 +654,81 @@ def scenario_new_product() -> None:
 
 
 # ---------- run everything and write the report ----------
+def scenario_screens() -> None:
+    """The screen helpers added for the history views, the CSV upload, the packing progress and the Listed on column."""
+    import io
+    # --- CSV bulk upload: same rules as the one-by-one form ---
+    conn = db()
+    skus = [r[0] for r in conn.execute("""SELECT p.sku FROM products p JOIN warehouse_stock w USING (product_id) WHERE p.is_active = 1
+                                          GROUP BY p.product_id HAVING SUM(w.available_qty) > 5 ORDER BY p.sku DESC LIMIT 40""")]
+    conn.close()
+    free = [k for k in skus if not sl.already_requested_today("Store G", int(one("SELECT product_id FROM products WHERE sku = ?", (k,))))]
+    a, b = free[0], free[1]
+    csv = f"SKU,Request qty,Note\n{a},2,fine\n{b},99999999,too many\n{a},1,again\nNO-SUCH-SKU,1,\n{b},x,\n{b},0,\n{b},-3,\n,4,\n"
+    good, report = sl.request_csv_check("Store G", pd.read_csv(io.StringIO(csv), dtype=str, keep_default_na=False, na_values=[""]))
+    check("R01", "CSV upload: exactly the one good row passes", len(good) == 1 and good[0]["SKU"] == a and good[0]["Request qty"] == 2)
+    check("R01", "CSV upload: more than the warehouse, a repeated SKU, an unknown SKU, text, zero, negative and an empty SKU are all skipped",
+          (report["Result"] != "OK").sum() == 7)
+    try:
+        sl.request_csv_check("Store G", pd.DataFrame({"x": [1]}))
+        check("R01", "CSV upload: a file without the SKU / Request qty columns is explained", False)
+    except ValueError:
+        check("R01", "CSV upload: a file without the SKU / Request qty columns is explained", True)
+    # --- Listed on: 'New' for an Agent 4 product that has not gone to a store; a date for a catalogue product ---
+    table = sl.product_details("Eval Silicone Spatula Set", "All", True)
+    check("R20", "Listed on shows New for a new product that has not gone to a store", len(table) >= 1 and set(table["Listed on"]) == {"New"})
+    old = sl.product_details("", "All", True)
+    check("R20", "Listed on shows a date for a catalogue product", (old["Listed on"] != "New").any() and (old["Listed on"].str.len() == 11).any())
+    # --- packing progress (12/30): typed numbers are kept as a draft and counted, wrong numbers are not kept ---
+    cat = sl.request_catalog("")[0]
+    cat = cat[[not sl.already_requested_today("Store G", int(x)) for x in cat["product_id"]]].head(4)
+    rows = cat.copy()
+    rows["Request qty"] = 2
+    rows["Note"] = ""
+    sl.raise_requests("Store G", "Evaluator", rows)
+    state = a1.propose()
+    a1.finish_store(state, "Store G", {})
+    for r in sl.barcode_requests().itertuples():
+        sl.mark_printed(int(r.id))
+    lines = sl.packing_lines("Store G")
+    n = len(lines)
+    lines.loc[:1, "Packed"] = lines.loc[:1, "To pack"]
+    sl.save_packing_draft(lines)
+    prog = sl.packing_progress()
+    row = prog[prog["Store"] == "Store G"].iloc[0]
+    check("R10", "packing progress counts the lines typed so far (2 of N)", int(row["Lines packed"]) == 2 and int(row["Lines"]) == n and row["Stage"] == "Packing in process")
+    cell = [r for r in sl.pipeline_board() if r["store"] == "Store G"][0]["cells"][3]
+    check("R10", "the pipeline shows the progress as 2/N", cell[0] == f"2/{n}", str(cell))
+    check("R10", "the tile shows the progress per store", f"G 2/{n}" in sl.packing_sub())
+    wrong = sl.packing_lines("Store G")
+    wrong.loc[2, "Packed"] = int(wrong.loc[2, "To pack"]) + 5
+    sl.save_packing_draft(wrong)
+    check("R10", "a typed number above 'to pack' is not kept", sl.packing_lines("Store G").loc[2, "Packed"] is pd.NA or pd.isna(sl.packing_lines("Store G").loc[2, "Packed"]))
+    check("R10", "typed numbers are not final: the lines are still 'to pack' until Done",
+          one("SELECT COUNT(*) FROM packing_items WHERE pack_status != 'to_pack' AND store_id = (SELECT store_id FROM stores WHERE store_code = 'Store G') AND trip_id IS NULL") == 0)
+    # --- history views: totals equal the database ---
+    start = sl.history_start()
+    hist, tot = sl.packing_history("", "All")
+    check("R13", "Packing History: total packed equals the database (last 12 months)",
+          tot["packed"] == one("""SELECT COALESCE(SUM(i.packed_qty), 0) FROM packing_items i JOIN trips t ON t.trip_id = i.trip_id
+                                  WHERE t.trip_date >= ? AND i.packed_qty > 0""", (start,)))
+    for code in ("Store C", "Store D", "Store A"):
+        trips = sl.store_trip_list(code)
+        if len(trips):
+            table, t = sl.store_trip_view(code, trips.iloc[0]["code"])
+            want = one("""SELECT COALESCE(SUM(ri.received_qty), 0) FROM receipt_items ri JOIN packing_items i ON i.pack_id = ri.packing_item_id
+                          JOIN trips t ON t.trip_id = i.trip_id JOIN stores s ON s.store_id = i.store_id
+                          WHERE s.store_code = ? AND t.trip_code = ? AND i.packed_qty > 0""", (code, trips.iloc[0]["code"]))
+            check("R14", f"Trip View ({code}): received total equals the database", t["received"] == want and len(table) > 0)
+            pid = int(sl.store_product_list(code).iloc[0]["pid"])
+            ptable, pt = sl.store_product_view(code, pid)
+            check("R14", f"Product View ({code}): one row per trip, totals add up",
+                  pt["trips"] == ptable["Trip ID"].nunique() and pt["requested"] == int(ptable["Requested qty"].sum()))
+            break
+    else:
+        check("R14", "Trip View: at least one store has a trip to look at", False)
+
+
 def main() -> int:
     print("Preparing a copy of the database (your real data is not touched) ...")
     reset_copy()
@@ -668,7 +743,8 @@ def main() -> int:
              ("Store receiving and alerts", scenario_receiving),
              ("Agent 3 manager report", scenario_agent3),
              ("Next week: stock counted once", scenario_second_cycle),
-             ("Agent 4 new product", scenario_new_product)]
+             ("Agent 4 new product", scenario_new_product),
+             ("Screens: CSV upload, Listed on, packing progress, history views", scenario_screens)]
     for title, fn in steps:
         print(f"- {title}")
         try:

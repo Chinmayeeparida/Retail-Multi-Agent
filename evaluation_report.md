@@ -1,12 +1,12 @@
 # Evaluation report
 
-Run on 2026-11-10 on a COPY of the simulated database (seed 42). No real data, no e-mail, no AI call.
+Run on 2026-11-11 on a COPY of the simulated database (seed 42). No real data, no e-mail, no AI call.
 
-**142 of 142 checks passed.**
+**155 of 155 checks passed.**
 
 | Rule | Area | What the rule says | Checks | Passed |
 |---|---|---|---:|---:|
-| R01 | Store request | A store cannot request more than the warehouse holds, and zero or negative quantities are refused. | 10 | 10 |
+| R01 | Store request | A store cannot request more than the warehouse holds, and zero or negative quantities are refused. | 13 | 13 |
 | R02 | Store request | A store can request an item only once per day. | 2 | 2 |
 | R03 | Agent 1 | Agent 1 never packs more than the warehouse can give (stock already promised to other lists is counted). | 12 | 12 |
 | R04 | Agent 1 | Agent 1 never packs more than the store asked, and never a negative number. | 6 | 6 |
@@ -15,17 +15,17 @@ Run on 2026-11-10 on a COPY of the simulated database (seed 42). No real data, n
 | R07 | Agent 1 | A person's edit cannot be negative or take more stock than is left, and a changed quantity needs a reason. | 8 | 8 |
 | R08 | Agent 1 | The AI only writes the note: a note with a number that is not in the facts, a link or a very long text is refused. | 7 | 7 |
 | R09 | Agent 1 | A packing list is checked against the LIVE warehouse stock again just before it is saved. | 3 | 3 |
-| R10 | Warehouse packing | Packed + damaged can never be more than the quantity to pack, and numbers cannot be negative. | 16 | 16 |
+| R10 | Warehouse packing | Packed + damaged can never be more than the quantity to pack, and numbers cannot be negative. | 21 | 21 |
 | R11 | Agent 2 | A trip leaves only on a store's scheduled weekday (Mon packing only, Fri urgent only, Sat/Sun none). | 11 | 11 |
 | R12 | Agent 2 | A store with a problem (or nothing packed, or not enough warehouse stock) is blocked and cannot go on a trip. | 3 | 3 |
-| R13 | Agent 2 | A trip is saved all or nothing; the warehouse stock goes down by exactly what was packed + damaged. | 6 | 6 |
-| R14 | Store receiving | Damaged cannot be more than received, numbers cannot be negative, and a store cannot confirm the same trip twice. | 7 | 7 |
+| R13 | Agent 2 | A trip is saved all or nothing; the warehouse stock goes down by exactly what was packed + damaged. | 7 | 7 |
+| R14 | Store receiving | Damaged cannot be more than received, numbers cannot be negative, and a store cannot confirm the same trip twice. | 9 | 9 |
 | R15 | Store receiving | A problem on a trip raises a Notice / Warning / Serious alert for the warehouse (10% and 30% of lines). | 6 | 6 |
 | R16 | Agent 3 | The manager summary is refused if it contains a number that is not in the data (a standard text is used instead). | 4 | 4 |
 | R17 | Agent 4 | A new product with bad details is refused: HSN not 4/6/8 digits, GST not a real slab, prices not cost <= selling <= MRP, no category or vendor, empty or duplicate name. | 18 | 18 |
 | R18 | Agent 4 | The SKU and product ID are made by code, never by the AI: unique, in the catalogue format, and never reused (also when two people add products at the same time). | 8 | 8 |
 | R19 | Agent 4 | A product is saved only after a named person approves; cancel or a failure saves nothing. | 5 | 5 |
-| R20 | Agent 4 | A new product gets its price and an empty warehouse slot, and cannot be requested by stores until stock arrives. | 4 | 4 |
+| R20 | Agent 4 | A new product gets its price and an empty warehouse slot, and cannot be requested by stores until stock arrives. | 6 | 6 |
 
 ## Every check
 
@@ -173,3 +173,16 @@ Run on 2026-11-10 on a COPY of the simulated database (seed 42). No real data, n
 | PASS | R18 | all SKUs in the catalogue are still unique |
 | PASS | R19 | a proposal that became a duplicate before approval is refused and saves nothing |
 | PASS | R20 | Agent 1 still runs normally with the new products in the catalogue |
+| PASS | R01 | CSV upload: exactly the one good row passes |
+| PASS | R01 | CSV upload: more than the warehouse, a repeated SKU, an unknown SKU, text, zero, negative and an empty SKU are all skipped |
+| PASS | R01 | CSV upload: a file without the SKU / Request qty columns is explained |
+| PASS | R20 | Listed on shows New for a new product that has not gone to a store |
+| PASS | R20 | Listed on shows a date for a catalogue product |
+| PASS | R10 | packing progress counts the lines typed so far (2 of N) |
+| PASS | R10 | the pipeline shows the progress as 2/N |
+| PASS | R10 | the tile shows the progress per store |
+| PASS | R10 | a typed number above 'to pack' is not kept |
+| PASS | R10 | typed numbers are not final: the lines are still 'to pack' until Done |
+| PASS | R13 | Packing History: total packed equals the database (last 12 months) |
+| PASS | R14 | Trip View (Store C): received total equals the database |
+| PASS | R14 | Product View (Store C): one row per trip, totals add up |

@@ -2,7 +2,7 @@
 
           [ Product Details ]  [ Inventory View ]  [ Sales Details ]
                       360 DEGREE VIEW (the dashboard in the middle)
- [ Barcode Request App ] [ Agent 1 Packing List ] [ Warehouse Packaging Tracker ] [ Store Receiving Tracker ]
+ [ Barcode Request Tracker ] [ Agent 1 Packing List ] [ Warehouse Packaging Tracker ] [ Store Receiving Tracker ]
 
 The two working apps open in their own browser tab:  store_app.py (port 8502) and packing_app.py (port 8503).
 (August 2025 data, shown with shifted dates; vendor details, rack names, requests and staff checks are SIMULATED.)
@@ -30,7 +30,7 @@ if problem:
 
 NEWP = "New Product (Agent 4)"
 TOP = ["Product Details", "Inventory View", "Sales Details"]
-BOTTOM = ["Store Stock Request Details", "Agent 1 Packing List", "Barcode Request App", "Warehouse Packaging Tracker", "Store Receiving Tracker", NEWP]
+BOTTOM = ["Store Stock Request Details", "Agent 1 Packing List", "Barcode Request Tracker", "Warehouse Packaging Tracker", "Store Receiving Tracker", NEWP]
 HOME = "360 Degree View"
 st.session_state.setdefault("page", HOME)
 SHIFT_NOTE = ("Demo data: the sales are from 2 to 31 Aug 2025, shown here as the 30 days ending yesterday. "
@@ -243,8 +243,8 @@ elif page == "Store Stock Request Details":
     else:
         st.dataframe(logic.requests_by_product(), hide_index=True, width="stretch", height=480)
 
-elif page == "Barcode Request App":
-    st.header("Barcode Request App")
+elif page == "Barcode Request Tracker":
+    st.header("Barcode Request Tracker")
     st.caption("Agent 1's approved list goes here first. Labels are printed (one label per unit to pack), then the list goes to packing.")
     reqs = logic.barcode_requests()
     if reqs.empty:
@@ -269,7 +269,7 @@ elif page == "Barcode Request App":
 elif page == "Agent 1 Packing List":
     st.header("Agent 1 - Packaging List Preparation")
     st.caption("Agent 1 looks at what the store asked for, its sales, what the store already has and what the warehouse has, then proposes "
-               "a packing quantity. Staff can change it (with a reason). Done sends the list to the Barcode Request App and the Packing App. "
+               "a packing quantity. Staff can change it (with a reason). Done sends the list to the Barcode Request Tracker and the Packing App. "
                "Store stock and requests are simulated.")
     st.dataframe(logic.agent1_overview(), hide_index=True, width="stretch")
     if "a1_state" not in st.session_state:
@@ -293,7 +293,7 @@ elif page == "Agent 1 Packing List":
             ok, msg = logic.a1_done(a1, store, base.drop(columns=[]), edited.assign(request_id=base["request_id"].values)[base.columns])
             if ok:
                 st.session_state.pop("a1_state", None)
-                st.session_state["a1_msg"] = f"{store}: packing list sent to the Barcode Request App and the Packing App. {msg}"
+                st.session_state["a1_msg"] = f"{store}: packing list sent to the Barcode Request Tracker and the Packing App. {msg}"
                 st.rerun()
             else:
                 st.error(msg)

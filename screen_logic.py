@@ -294,6 +294,8 @@ def categories() -> list[str]:
 def product_details(search: str, category: str, active_only: bool) -> pd.DataFrame:
     t = df("""SELECT p.sku AS "SKU", p.product_name AS "Product", c.category_name AS "Category", v.vendor_name AS "Vendor",
                      p.colour AS "Colour", pr.cost_price AS "Cost price", pr.selling_price AS "Selling price",
+                     p.created_date AS created,
+                     EXISTS (SELECT 1 FROM packing_items i WHERE i.product_id = p.product_id AND i.trip_id IS NOT NULL) AS sent,
                      CASE p.is_active WHEN 1 THEN 'Active' ELSE 'Inactive' END AS "Status"
               FROM products p LEFT JOIN categories c USING (category_id) LEFT JOIN vendors v USING (vendor_id)
               LEFT JOIN product_prices pr ON pr.product_id = p.product_id AND pr.effective_from =
@@ -303,7 +305,10 @@ def product_details(search: str, category: str, active_only: bool) -> pd.DataFra
     t["Colour"] = t["Colour"].fillna("-")
     t["Selling price"] = t["Selling price"].map(lambda v: "-" if pd.isna(v) else f"{v:,.0f}")
     t["Cost price"] = t["Cost price"].map(lambda v: "-" if pd.isna(v) else f"{v:,.0f}")
-    return t
+    # Listed on: the registration date; "New" for a product added by Agent 4 (its created_date carries a time) that has not gone to a store yet
+    t.insert(t.columns.get_loc("Selling price") + 1, "Listed on",
+             [("New" if len(str(c)) > 10 and not sent else nice(str(c)[:10])) for c, sent in zip(t["created"], t["sent"])])
+    return t.drop(columns=["created", "sent"])
 
 
 def inventory(search: str, category: str, low_only: bool) -> pd.DataFrame:
@@ -409,7 +414,7 @@ def sales_by_day() -> pd.DataFrame:
     return t.reset_index(drop=True)
 
 
-# ---------------- Barcode Request App ----------------
+# ---------------- Barcode Request Tracker ----------------
 def barcode_requests() -> pd.DataFrame:
     t = df("""SELECT b.barcode_request_id AS id, s.store_code AS "Store", b.total_labels AS "Labels", b.status AS "Status",
                      b.requested_at AS "Requested", b.printed_at AS "Printed"
@@ -634,7 +639,7 @@ def packing_status(to_pack: int, packed, damaged: int = 0) -> str:
 
 
 def packing_progress() -> pd.DataFrame:
-    t = df("""SELECT s.store_code AS "Store", COUNT(*) AS "Lines", SUM(i.pack_status != 'to_pack') AS "Lines packed",
+    t = df("""SELECT s.store_code AS "Store", COUNT(*) AS "Lines", SUM(i.packed_qty IS NOT NULL) AS "Lines packed",
                         SUM(i.qty_to_pack) AS "Units to pack",
                         COALESCE(SUM(i.packed_qty), 0) AS "Units packed", COALESCE(SUM(i.damaged_qty), 0) AS "Damaged",
                         CASE WHEN SUM(i.pack_status = 'to_pack') > 0 THEN 'Packing in process'
@@ -680,7 +685,7 @@ def packing_done_lists() -> pd.DataFrame:
 def packing_lines(store: str, done: bool = False) -> pd.DataFrame:
     """done=False: the lines still to pack. done=True: the lines already packed (shown again for checking / correcting)."""
     t = df(f"""SELECT i.pack_id, i.rack_name AS "Rack", p.sku AS "SKU", p.product_name AS "Product", i.qty_to_pack AS "To pack",
-                     {"i.packed_qty" if done else "CAST(NULL AS INTEGER)"} AS "Packed", {"i.damaged_qty" if done else "0"} AS "Damaged"
+                     i.packed_qty AS "Packed", i.damaged_qty AS "Damaged"
               FROM packing_items i JOIN products p USING (product_id) JOIN stores s ON s.store_id = i.store_id
               WHERE s.store_code = ? AND i.trip_id IS NULL AND i.pack_status {"!=" if done else "="} 'to_pack'
               ORDER BY i.rack_name, p.sku""", (store,))
@@ -693,6 +698,23 @@ def packing_with_status(table: pd.DataFrame) -> pd.DataFrame:
     t = table.copy()
     t["Status"] = [packing_status(r["To pack"], r["Packed"], 0 if pd.isna(r["Damaged"]) else r["Damaged"]) for _, r in t.iterrows()]
     return t
+
+
+def save_packing_draft(table: pd.DataFrame) -> None:
+    """Keeps the numbers the staff have typed so far (before Done), so the 360 view can show progress such as 12/30.
+    Only lines still 'to_pack' are touched; nothing is final until Done."""
+    conn = connect()
+    try:
+        with conn:
+            for _, r in table.iterrows():
+                packed = None if pd.isna(r["Packed"]) else int(r["Packed"])
+                damaged = 0 if pd.isna(r["Damaged"]) else int(r["Damaged"])
+                if (packed is not None and packed < 0) or damaged < 0 or (packed is not None and packed + damaged > int(r["To pack"])):
+                    continue                                   # a wrong number is not kept (Done refuses it with a message)
+                conn.execute("""UPDATE packing_items SET packed_qty = ?, damaged_qty = ?
+                                WHERE pack_id = ? AND pack_status = 'to_pack' AND trip_id IS NULL""", (packed, damaged, int(r["pack_id"])))
+    finally:
+        conn.close()
 
 
 def save_packing(staff: str, table: pd.DataFrame, update: bool = False) -> tuple[bool, str]:
@@ -841,14 +863,15 @@ def a4_save(proposal: dict, who: str) -> dict:
 
 
 # ---------------- helpers for the whole chain ----------------
-def change_signature() -> str:
+def change_signature(drafts: bool = True) -> str:
     """A short fingerprint of the work in progress: when it changes, the open pages reload themselves."""
     conn = connect()
     try:
         parts = [conn.execute(q).fetchone()[0] for q in (
             "SELECT COUNT(*) || '/' || COALESCE(MAX(request_id), 0) || '/' || SUM(status = 'pending') FROM restock_requests",
             "SELECT COUNT(*) || '/' || SUM(status = 'printed') FROM barcode_requests",
-            "SELECT COUNT(*) || '/' || SUM(pack_status = 'to_pack') || '/' || SUM(trip_id IS NOT NULL) FROM packing_items",
+            "SELECT COUNT(*) || '/' || SUM(pack_status = 'to_pack') || '/' || SUM(trip_id IS NOT NULL)"
+            + (" || '/' || SUM(packed_qty IS NOT NULL)" if drafts else "") + " FROM packing_items",
             "SELECT COUNT(*) || '/' || COALESCE(GROUP_CONCAT(status), '') FROM trip_stores",
             "SELECT COUNT(*) || '/' || SUM(acknowledged) FROM warehouse_alerts")]
     finally:
@@ -921,7 +944,7 @@ def status_tiles(day: str) -> dict:
     return {"workflow": [
         {"label": "New requests", "value": req_items, "sub": f"items from {req_stores} store(s)", "tone": "warn" if req_items else "idle"},
         {"label": "Labels to print", "value": labels, "sub": "store(s) waiting", "tone": "warn" if labels else "idle"},
-        {"label": "Packing in process", "value": packing, "sub": "store(s)", "tone": "info" if packing else "idle"},
+        {"label": "Packing in process", "value": packing, "sub": packing_sub(), "tone": "info" if packing else "idle"},
         {"label": "Ready to dispatch", "value": ready, "sub": "store(s) waiting for trip ID", "tone": "info" if ready else "idle"},
         {"label": "On a trip", "value": way, "sub": "store(s) on the way or checking", "tone": "info" if way else "idle"},
         {"label": "Open alerts", "value": len(alerts), "sub": "serious: act now" if serious else "not yet read",
@@ -932,6 +955,16 @@ def status_tiles(day: str) -> dict:
          "sub": "of last month's sales done so far", "tone": "ok"},
         {"label": "Best store", "value": top.iloc[0]["Store"], "sub": f"Rs {int(top.iloc[0]['Sales (Rs)']):,} in 30 days", "tone": "ok"},
         {"label": "Next trip day", "value": next_trip_day(day), "sub": "stores due that day are listed below", "tone": "info"}]}
+
+
+def packing_sub() -> str:
+    """'A 12/30, B 0/20': lines the staff have typed a packed number for, out of all lines of each store."""
+    prog = packing_progress()
+    prog = prog[prog["Stage"] == "Packing in process"]
+    if prog.empty:
+        return "store(s)"
+    parts = [f"{r.Store.replace('Store ', '')} {int(r._3)}/{int(r.Lines)}" for r in prog.itertuples()]
+    return ", ".join(parts[:4]) + (f" +{len(parts) - 4} more" if len(parts) > 4 else "")
 
 
 def next_trip_day(day: str) -> str:
@@ -958,6 +991,7 @@ def pipeline_board() -> list[dict]:
                           LEFT JOIN trip_stores ts ON ts.trip_id = i.trip_id AND ts.store_id = i.store_id
                           WHERE i.store_id = ? AND (i.trip_id IS NULL OR ts.status != 'received')""")
         n_items, n_open, n_on_trip, trip_code, trip_status = open_items
+        entered, in_list = q("SELECT COALESCE(SUM(packed_qty IS NOT NULL), 0), COUNT(*) FROM packing_items WHERE store_id = ? AND trip_id IS NULL")
         lab = q("SELECT COUNT(*), SUM(status = 'requested') FROM barcode_requests WHERE store_id = ? AND status IN ('requested','printed') "
                 "AND barcode_request_id IN (SELECT barcode_request_id FROM packing_items WHERE store_id = ? AND (trip_id IS NULL OR trip_id IN "
                 "(SELECT trip_id FROM trip_stores WHERE store_id = ? AND status != 'received')))", sid, sid) if n_items else None
@@ -967,7 +1001,7 @@ def pipeline_board() -> list[dict]:
             cells = [(f"{n_items} items", "done"), (f"{n_items} ok", "done"),
                      ("to print", "wait") if unprinted else ("printed", "done"),
                      ("after labels", "todo") if unprinted else
-                     ((f"{n_open} lines left", "now") if n_open else ("packed", "done")),
+                     ((f"{entered}/{in_list}", "now") if n_open else ("packed", "done")),
                      (trip_code[5:] if n_on_trip else ("no trip yet" if not n_open else "-"), "done" if n_on_trip else ("wait" if not n_open else "todo")),
                      ({"in_transit": "in transit", "reached": "reached store", "checking": "checking"}.get(trip_status, "-"), "now" if trip_status else "todo")]
         elif pend:
@@ -997,7 +1031,7 @@ def action_items(day: str) -> list[dict]:
     lab = df("""SELECT s.store_code FROM barcode_requests b JOIN stores s USING (store_id) WHERE b.status = 'requested'
                 GROUP BY s.store_code ORDER BY s.store_code""")["store_code"].tolist()
     if lab:
-        items.append({"tone": "warn", "who": "Label printing", "page": "Barcode Request App",
+        items.append({"tone": "warn", "who": "Label printing", "page": "Barcode Request Tracker",
                       "text": f"Print the barcode labels for {', '.join(c.replace('Store ', '') for c in lab)}, then press Labels printed."})
     prog = packing_progress()
     for r in prog[prog["Stage"] == "Packing in process"].itertuples():
@@ -1033,3 +1067,149 @@ def db_problem() -> str | None:
     finally:
         conn.close()
     return None
+
+
+# ---------------- history views (last 12 months) ----------------
+HISTORY_DAYS = 365
+
+
+def history_start() -> str:
+    return (today() - datetime.timedelta(days=HISTORY_DAYS)).isoformat()
+
+
+def packing_history(search: str = "", store: str = "All") -> tuple[pd.DataFrame, dict]:
+    """Warehouse staff: which product was packed for which store, how many times (trips) and how many units, in the last year."""
+    like = f"%{search.strip()}%"
+    t = df("""SELECT p.sku AS "SKU", p.product_name AS "Product", s.store_code AS "Store", COUNT(DISTINCT i.trip_id) AS "Times packed",
+                     SUM(i.packed_qty) AS "Total packed", SUM(i.damaged_qty) AS "Damaged while packing", MAX(tr.trip_date) AS last_trip
+              FROM packing_items i JOIN trips tr ON tr.trip_id = i.trip_id JOIN products p ON p.product_id = i.product_id
+              JOIN stores s ON s.store_id = i.store_id
+              WHERE tr.trip_date >= ? AND i.packed_qty > 0 AND (p.product_name LIKE ? OR p.sku LIKE ?) AND (? = 'All' OR s.store_code = ?)
+              GROUP BY p.product_id, s.store_id ORDER BY p.product_name, s.store_code""", (history_start(), like, like, store, store))
+    t.insert(len(t.columns), "Last packed", t["last_trip"].map(nice))
+    t = t.drop(columns=["last_trip"])
+    trips = df("""SELECT COUNT(DISTINCT i.trip_id) AS n FROM packing_items i JOIN trips tr ON tr.trip_id = i.trip_id
+                  JOIN products p ON p.product_id = i.product_id JOIN stores s ON s.store_id = i.store_id
+                  WHERE tr.trip_date >= ? AND i.packed_qty > 0 AND (p.product_name LIKE ? OR p.sku LIKE ?) AND (? = 'All' OR s.store_code = ?)""",
+               (history_start(), like, like, store, store))["n"].iloc[0]
+    totals = {"products": int(t["SKU"].nunique()), "trips": int(trips), "packed": int(t["Total packed"].sum()) if len(t) else 0,
+              "damaged": int(t["Damaged while packing"].sum()) if len(t) else 0}
+    return t, totals
+
+
+_STORE_LINES = """
+    FROM packing_items i JOIN trips tr ON tr.trip_id = i.trip_id JOIN stores s ON s.store_id = i.store_id
+    JOIN products p ON p.product_id = i.product_id JOIN restock_requests rq ON rq.request_id = i.request_id
+    LEFT JOIN receipt_items ri ON ri.packing_item_id = i.pack_id LEFT JOIN store_receipts sr ON sr.receipt_id = ri.receipt_id
+    WHERE s.store_code = ? AND tr.trip_date >= ? AND i.packed_qty > 0 """
+
+
+def _store_line_table(rows: pd.DataFrame) -> pd.DataFrame:
+    rows["Received date"] = rows["received_at"].map(lambda v: "Not received yet" if pd.isna(v) else nice(str(v)[:10]))
+    for c in ("Requested qty", "Packed qty", "Received qty", "Damaged qty"):
+        rows[c] = rows[c].astype("Int64")
+    return rows.drop(columns=["received_at"])
+
+
+def store_trip_list(store: str) -> pd.DataFrame:
+    """Trips of this store in the last 12 months, newest first."""
+    return df("SELECT DISTINCT tr.trip_code AS code, tr.trip_date AS day " + _STORE_LINES + " ORDER BY tr.trip_date DESC, tr.trip_code DESC",
+              (store, history_start()))
+
+
+def store_trip_view(store: str, trip_code: str) -> tuple[pd.DataFrame, dict]:
+    t = df("""SELECT p.product_name AS "Product", rq.requested_qty AS "Requested qty", i.packed_qty AS "Packed qty",
+                     ri.received_qty AS "Received qty", ri.damaged_qty AS "Damaged qty", sr.received_at AS received_at """
+           + _STORE_LINES + " AND tr.trip_code = ? ORDER BY p.product_name", (store, history_start(), trip_code))
+    t = _store_line_table(t)
+    t.insert(1, "Trip ID", trip_code)
+    return t, _totals(t, trips=1)
+
+
+def store_product_list(store: str, search: str = "") -> pd.DataFrame:
+    like = f"%{search.strip()}%"
+    return df("SELECT DISTINCT p.product_id AS pid, p.sku AS sku, p.product_name AS name " + _STORE_LINES
+              + " AND (p.product_name LIKE ? OR p.sku LIKE ?) ORDER BY p.product_name LIMIT 300", (store, history_start(), like, like))
+
+
+def store_product_view(store: str, product_id: int) -> tuple[pd.DataFrame, dict]:
+    t = df("""SELECT p.product_name AS "Product", tr.trip_code AS "Trip ID", rq.requested_qty AS "Requested qty", i.packed_qty AS "Packed qty",
+                     ri.received_qty AS "Received qty", ri.damaged_qty AS "Damaged qty", sr.received_at AS received_at, tr.trip_date AS day """
+           + _STORE_LINES + " AND p.product_id = ? ORDER BY tr.trip_date DESC, tr.trip_code DESC", (store, history_start(), product_id))
+    t = _store_line_table(t.drop(columns=["day"]))
+    return t, _totals(t, trips=int(t["Trip ID"].nunique()))
+
+
+def _totals(t: pd.DataFrame, trips: int) -> dict:
+    s = lambda c: int(t[c].fillna(0).sum()) if len(t) else 0
+    return {"trips": trips, "requested": s("Requested qty"), "packed": s("Packed qty"), "received": s("Received qty"), "damaged": s("Damaged qty")}
+
+
+# ---------------- Store Stock Request App: bulk upload by CSV ----------------
+REQUEST_CSV_TEMPLATE = "SKU,Request qty,Note\n"
+MAX_CSV_ROWS = 500
+
+
+def request_csv_check(store: str, raw: pd.DataFrame) -> tuple[list[dict], pd.DataFrame]:
+    """Checks an uploaded CSV row by row (same rules as the one-by-one form). Returns (good rows, a table of every row with its result).
+    Nothing is saved here; a row that breaks a rule is skipped with the reason, the good rows still go through."""
+    cols = {str(c).strip().lower(): c for c in raw.columns}
+    sku_col = cols.get("sku")
+    qty_col = next((cols[k] for k in ("request qty", "request_qty", "qty", "quantity") if k in cols), None)
+    note_col = cols.get("note")
+    if sku_col is None or qty_col is None:
+        raise ValueError("The file needs the columns SKU and Request qty (and optionally Note). Download the template to start.")
+    if len(raw) > MAX_CSV_ROWS:
+        raise ValueError(f"The file has {len(raw)} rows; the limit is {MAX_CSV_ROWS} per upload.")
+    skus = [str(v).strip() for v in raw[sku_col] if pd.notna(v) and str(v).strip()]
+    info = {}
+    if skus:
+        marks = ",".join("?" * len(skus))
+        for r in df(f"""SELECT p.product_id, p.sku, p.product_name, p.is_active,
+                               (SELECT pr.selling_price FROM product_prices pr WHERE pr.product_id = p.product_id
+                                ORDER BY pr.effective_from DESC LIMIT 1) AS price,
+                               COALESCE((SELECT SUM(w.available_qty) FROM warehouse_stock w WHERE w.product_id = p.product_id), 0) AS inv
+                        FROM products p WHERE p.sku IN ({marks})""", tuple(skus)).itertuples():
+            info[r.sku] = r
+    good, report, seen = [], [], set()
+    for n, (_, row) in enumerate(raw.iterrows(), start=2):          # row 1 of the file is the header
+        sku = "" if pd.isna(row[sku_col]) else str(row[sku_col]).strip()
+        raw_qty = row[qty_col]
+        note = "" if note_col is None or pd.isna(row[note_col]) else str(row[note_col]).strip()
+        reason = None
+        qty = None
+        if not sku:
+            reason = "SKU is empty"
+        else:
+            try:
+                qty_f = float(raw_qty)
+                qty = int(qty_f)
+                if qty != qty_f:
+                    reason, qty = "Request qty must be a whole number", None
+                elif qty <= 0:
+                    reason, qty = "Request qty must be more than 0", None
+            except (TypeError, ValueError):
+                reason = "Request qty is not a number"
+        if reason is None:
+            p = info.get(sku)
+            if p is None:
+                reason = "SKU not found"
+            elif not p.is_active:
+                reason = "product is not active"
+            elif sku in seen:
+                reason = "SKU appears twice in the file"
+            elif p.inv <= 0:
+                reason = "out of stock in the warehouse (OS)"
+            elif qty > p.inv:
+                reason = f"more than the warehouse quantity ({int(p.inv)})"
+            elif already_requested_today(store, int(p.product_id)):
+                reason = "this store already requested it today"
+            elif len(note) > guardrails.MAX_REQUEST_NOTE_CHARS:
+                reason = f"Note is too long (at most {guardrails.MAX_REQUEST_NOTE_CHARS} characters)"
+        if reason is None:
+            seen.add(sku)
+            good.append({"product_id": int(p.product_id), "SKU": p.sku, "Product Name": p.product_name,
+                         "Selling price": "-" if pd.isna(p.price) else f"{p.price:,.0f}", "Inventory qty": int(p.inv),
+                         "Request qty": qty, "Note": note})
+        report.append({"File row": n, "SKU": sku or "-", "Request qty": "" if pd.isna(raw_qty) else str(raw_qty), "Result": "OK" if reason is None else f"Skipped: {reason}"})
+    return good, pd.DataFrame(report)

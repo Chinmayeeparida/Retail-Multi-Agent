@@ -237,9 +237,9 @@ def save(state: dict, approved_by: str) -> dict:
             category_id = conn.execute("SELECT category_id FROM categories WHERE category_name = ?", (f["category"],)).fetchone()[0]
             product_id = conn.execute(
                 """INSERT INTO products (sku, product_number, product_name, vendor_id, category_id, sub_category, brand,
-                                         hsn_code, gst_rate, colour, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+                                         hsn_code, gst_rate, colour, is_active, created_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now', 'localtime'))""",
                 (sku, number, f["name"], vendor_id, category_id, f["sub_category"] or None, f["brand"] or None,
-                 f["hsn"], f["gst"], f["colour"] or None)).lastrowid
+                 f["hsn"], f["gst"], f["colour"] or None)).lastrowid     # created_date WITH a time marks a product added by Agent 4 (the 360 view shows 'New' until it goes to a store)
             today = datetime.date.today().isoformat()
             conn.execute("INSERT INTO product_prices (product_id, mrp, cost_price, selling_price, effective_from) VALUES (?, ?, ?, ?, ?)",
                          (product_id, f["mrp"], f["cost"], f["selling"], today))

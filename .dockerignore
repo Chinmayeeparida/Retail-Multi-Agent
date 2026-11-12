@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+.git/
+.env
+data/raw/
+data/retail.db
+data/store_mapping.csv
+data/previous_month_sales.csv
+data/pipeline_checkpoints.db
+outbox/
+*.docx
+hello_*.py
+docs/
